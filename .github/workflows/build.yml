@@ -1,129 +1,321 @@
 name: Build PS4 Mesa stack
 
 on:
-  workflow_dispatch:
+workflow_dispatch:
 
 permissions:
-  contents: write
+contents: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+build:
+runs-on: ubuntu-latest
 
-    container:
-      image: archlinux:latest
+container:
+  image: archlinux:latest
 
-    env:
-      REPO_DIR: repo
+env:
+  REPO_DIR: repo
+  MESA_WHICH_LLVM: "4"
 
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: true
+steps:
 
-      - name: Initialize Arch
-        shell: bash
-        run: |
-          set -euxo pipefail
+  - uses: actions/checkout@v6
+    with:
+      fetch-depth: 0
+      persist-credentials: true
 
-          pacman-key --init
-          pacman-key --populate archlinux
+  # ==================================================
+  # Initialize Arch
+  # ==================================================
 
-          sed -i '/#\[multilib\]/,/Include/s/^#//' /etc/pacman.conf
+  - name: Initialize Arch
+    shell: bash
+    run: |
+      set -euxo pipefail
 
-          echo 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch' \
-            > /etc/pacman.d/mirrorlist
+      pacman-key --init
+      pacman-key --populate archlinux
 
-          pacman -Syu --noconfirm
+      sed -i '/#multilib/,/Include/s/^#//' /etc/pacman.conf
 
-      - name: Install build tools
-        shell: bash
-        run: |
-          set -euxo pipefail
+      echo 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch' \
+        > /etc/pacman.d/mirrorlist
 
-          pacman -S --noconfirm --needed \
-            base-devel \
-            git \
-            sudo \
-            fakeroot
+      pacman -Syu --noconfirm
 
-      - name: Create builder user
-        shell: bash
-        run: |
-          set -euxo pipefail
+  # ==================================================
+  # Build tools
+  # ==================================================
 
-          useradd -m builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-          chown -R builder:builder "$GITHUB_WORKSPACE"
+  - name: Install build tools
+    shell: bash
+    run: |
+      set -euxo pipefail
 
-      - name: Build packages
-        shell: bash
-        run: |
-          set -euxo pipefail
-      
-          mkdir -p "$GITHUB_WORKSPACE/$REPO_DIR"
-      
-          build_and_install() {
-            local pkg="$1"
-      
-            echo "=== BUILDING $pkg ==="
-      
-            cd "$GITHUB_WORKSPACE/$pkg"
-      
-            sudo -u builder bash -c "
-              cd '$GITHUB_WORKSPACE/$pkg' &&
-              makepkg -sfc --noconfirm --skippgpcheck
-            "
-      
-            PKG_FILE=$(find . -maxdepth 1 -name "*.pkg.tar.zst" | head -n1)
-      
-            cp "$PKG_FILE" "$GITHUB_WORKSPACE/$REPO_DIR/"
+      pacman -S --noconfirm --needed \
+        base-devel \
+        git \
+        sudo \
+        fakeroot
 
-            pacman -Rdd --noconfirm mesa || true
-            pacman -Rdd --noconfirm lib32-mesa || true
-      
-            pacman -U --noconfirm "$PKG_FILE"
-          }
-      
-          # install missing multilib deps first
-          cat >> /etc/pacman.conf << 'EOF'
+  # ==================================================
+  # Create builder
+  # ==================================================
 
-          [multilib]
-          Include = /etc/pacman.d/mirrorlist
-          EOF
-          
-          pacman -Sy --noconfirm lib32-gcc-libs lib32-libpciaccess
-      
-          build_and_install libdrm-ps4
-          #build_and_install lib32-libdrm-ps4
-          #build_and_install xf86-video-amdgpu-ps4
-          #build_and_install mesa-ps4
-          #build_and_install lib32-mesa-ps4
+  - name: Create builder user
+    shell: bash
+    run: |
+      set -euxo pipefail
 
-      - name: Create repo
-        shell: bash
-        run: |
-          set -euxo pipefail
+      useradd -m builder
 
-          cd "$GITHUB_WORKSPACE/$REPO_DIR"
-          repo-add ps4-video.db.tar.zst *.pkg.tar.zst
+      echo "builder ALL=(ALL) NOPASSWD: ALL" \
+        >> /etc/sudoers
 
-      - name: Commit artifacts
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -euxo pipefail
+      chown -R builder:builder "$GITHUB_WORKSPACE"
 
-          cd "$GITHUB_WORKSPACE"/"$REPO_DIR"/
+  # ==================================================
+  # Install LLVM 22 / Rusticl dependencies
+  # ==================================================
 
-          pwd
-          ls -la
-          ls -la "$GITHUB_WORKSPACE"
-          ls -la "$GITHUB_WORKSPACE/.git" || true
-      
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          
-          git add *
-          git commit -m "Update Mesa + drivers $(date +'%Y-%m-%d %H:%M')" || echo "No changes"
-          git push
+  - name: Install LLVM and Rusticl dependencies
+    shell: bash
+    run: |
+      set -euxo pipefail
+
+      pacman -S --noconfirm --needed \
+        llvm \
+        llvm-libs \
+        clang \
+        libclc \
+        spirv-llvm-translator \
+        spirv-tools \
+        rust \
+        rust-bindgen
+
+      echo
+      echo "===== LLVM ====="
+      llvm-config --version
+      clang --version | head -n 1
+
+      LLVM_VERSION="$(llvm-config --version)"
+
+      case "$LLVM_VERSION" in
+        22.*)
+          echo "LLVM 22 detected: $LLVM_VERSION"
+          ;;
+        *)
+          echo "ERROR: LLVM 22 required."
+          exit 1
+          ;;
+      esac
+
+  # ==================================================
+  # Show Mesa source configuration
+  # ==================================================
+
+  - name: Check Mesa configuration
+    shell: bash
+    run: |
+      set -euxo pipefail
+
+      echo "MESA_WHICH_LLVM=$MESA_WHICH_LLVM"
+
+      echo
+      echo "===== mesa-ps4 directory ====="
+      ls -la mesa-ps4
+
+      echo
+      echo "===== PKGBUILD version ====="
+      grep -E '^pkgver=|^pkgrel=' \
+        mesa-ps4/PKGBUILD
+
+      echo
+      echo "===== Mesa source ====="
+      grep -E 'archive.mesa3d|mesa.git|pkgver' \
+        mesa-ps4/PKGBUILD || true
+
+  # ==================================================
+  # Build packages
+  # ==================================================
+
+  - name: Build packages
+    shell: bash
+    run: |
+      set -euxo pipefail
+
+      mkdir -p "$GITHUB_WORKSPACE/$REPO_DIR"
+
+      build_and_install() {
+
+        local pkg="$1"
+
+        echo
+        echo "========================================"
+        echo "BUILDING $pkg"
+        echo "========================================"
+
+        cd "$GITHUB_WORKSPACE/$pkg"
+
+        chown -R builder:builder .
+
+        sudo -u builder bash -c "
+          cd '$GITHUB_WORKSPACE/$pkg' &&
+          export MESA_WHICH_LLVM='$MESA_WHICH_LLVM' &&
+          makepkg -sfc --noconfirm --skippgpcheck
+        "
+
+        PKG_FILE=$(find . -maxdepth 1 \
+          -type f \
+          -name "*.pkg.tar.zst" \
+          | head -n1)
+
+        if [ -z "$PKG_FILE" ]; then
+          echo "ERROR: No package generated for $pkg"
+          exit 1
+        fi
+
+        echo
+        echo "Generated:"
+        echo "$PKG_FILE"
+
+        cp "$PKG_FILE" \
+          "$GITHUB_WORKSPACE/$REPO_DIR/"
+
+        echo
+        echo "Package information:"
+        pacman -Qip "$PKG_FILE"
+
+        # ------------------------------------------
+        # Only remove conflicting system Mesa
+        # after the package has successfully built.
+        # ------------------------------------------
+
+        if [[ "$pkg" == "mesa-ps4" ]]; then
+
+          echo
+          echo "Removing conflicting Arch Mesa packages..."
+
+          pacman -Rdd --noconfirm mesa || true
+          pacman -Rdd --noconfirm lib32-mesa || true
+
+        fi
+
+        echo
+        echo "Installing $PKG_FILE"
+
+        pacman -U --noconfirm "$PKG_FILE"
+      }
+
+      # ==================================================
+      # Enable multilib
+      # ==================================================
+
+      if ! grep -q '^multilib' /etc/pacman.conf; then
+
+        cat >> /etc/pacman.conf << 'EOF'
+
+      [multilib]
+      Include = /etc/pacman.d/mirrorlist
+      EOF
+
+      fi
+
+      pacman -Sy --noconfirm \
+        lib32-gcc-libs \
+        lib32-libpciaccess
+
+      # ==================================================
+      # PS4 packages
+      # ==================================================
+
+      build_and_install libdrm-ps4
+
+      # ==================================================
+      # Mesa PS4
+      # ==================================================
+
+      build_and_install mesa-ps4
+
+      # ==================================================
+      # Optional packages
+      # ==================================================
+
+      # build_and_install lib32-libdrm-ps4
+      # build_and_install xf86-video-amdgpu-ps4
+      # build_and_install lib32-mesa-ps4
+
+  # ==================================================
+  # Inspect Mesa package
+  # ==================================================
+
+  - name: Inspect Mesa package
+    shell: bash
+    run: |
+      set -euxo pipefail
+
+      cd "$GITHUB_WORKSPACE/$REPO_DIR"
+
+      echo "===== Packages ====="
+      ls -lh
+
+      echo
+      echo "===== Rusticl ====="
+
+      tar -tf mesa-ps4-*.pkg.tar.zst \
+        | grep -Ei \
+          'Rusticl|rusticl|libRusticlOpenCL|OpenCL' \
+        || true
+
+      echo
+      echo "===== radeonsi ====="
+
+      tar -tf mesa-ps4-*.pkg.tar.zst \
+        | grep -Ei 'radeonsi' \
+        || true
+
+      echo
+      echo "===== LLVM ====="
+
+      pacman -Q llvm llvm-libs clang
+
+  # ==================================================
+  # Create repository
+  # ==================================================
+
+  - name: Create repo
+    shell: bash
+    run: |
+      set -euxo pipefail
+
+      cd "$GITHUB_WORKSPACE/$REPO_DIR"
+
+      repo-add \
+        ps4-video.db.tar.zst \
+        *.pkg.tar.zst
+
+  # ==================================================
+  # Commit artifacts
+  # ==================================================
+
+  - name: Commit artifacts
+    working-directory: ${{ github.workspace }}
+    shell: bash
+    run: |
+      set -euxo pipefail
+
+      cd "$GITHUB_WORKSPACE/$REPO_DIR"
+
+      pwd
+      ls -la
+
+      git config user.name "github-actions"
+      git config user.email "actions@github.com"
+
+      git add *
+
+      git commit \
+        -m "Update Mesa PS4 26.1.4 + Rusticl $(date +'%Y-%m-%d %H:%M')" \
+        || echo "No changes"
+
+      git push
