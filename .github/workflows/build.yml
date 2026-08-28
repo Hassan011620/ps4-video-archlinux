@@ -1,6 +1,14 @@
 name: Build PS4 Mesa stack
 
 on:
+push:
+branches:
+- main
+paths:
+- 'mesa-ps4/'
+- 'libdrm-ps4/'
+- 'lib32-mesa-ps4/**'
+- '.github/workflows/build.yml'
 workflow_dispatch:
 
 permissions:
@@ -36,10 +44,11 @@ steps:
       pacman-key --init
       pacman-key --populate archlinux
 
-      sed -i '/#multilib/,/Include/s/^#//' /etc/pacman.conf
-
       echo 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch' \
         > /etc/pacman.d/mirrorlist
+
+      # Enable multilib
+      sed -i '/^\#multilib/,/^\#Include/s/^#//' /etc/pacman.conf
 
       pacman -Syu --noconfirm
 
@@ -56,7 +65,8 @@ steps:
         base-devel \
         git \
         sudo \
-        fakeroot
+        fakeroot \
+        repo
 
   # ==================================================
   # Create builder
@@ -75,7 +85,7 @@ steps:
       chown -R builder:builder "$GITHUB_WORKSPACE"
 
   # ==================================================
-  # Install LLVM 22 / Rusticl dependencies
+  # Install LLVM / Rusticl dependencies
   # ==================================================
 
   - name: Install LLVM and Rusticl dependencies
@@ -105,13 +115,13 @@ steps:
           echo "LLVM 22 detected: $LLVM_VERSION"
           ;;
         *)
-          echo "ERROR: LLVM 22 required."
+          echo "ERROR: LLVM 22 required, got: $LLVM_VERSION"
           exit 1
           ;;
       esac
 
   # ==================================================
-  # Show Mesa source configuration
+  # Check source configuration
   # ==================================================
 
   - name: Check Mesa configuration
@@ -120,6 +130,10 @@ steps:
       set -euxo pipefail
 
       echo "MESA_WHICH_LLVM=$MESA_WHICH_LLVM"
+
+      echo
+      echo "===== Repository ====="
+      ls -la
 
       echo
       echo "===== mesa-ps4 directory ====="
@@ -146,8 +160,7 @@ steps:
 
       mkdir -p "$GITHUB_WORKSPACE/$REPO_DIR"
 
-      build_and_install() {
-
+      build_package() {
         local pkg="$1"
 
         echo
@@ -160,8 +173,8 @@ steps:
         chown -R builder:builder .
 
         sudo -u builder bash -c "
-          cd '$GITHUB_WORKSPACE/$pkg' &&
-          export MESA_WHICH_LLVM='$MESA_WHICH_LLVM' &&
+          cd '$GITHUB_WORKSPACE/$pkg'
+          export MESA_WHICH_LLVM='$MESA_WHICH_LLVM'
           makepkg -sfc --noconfirm --skippgpcheck
         "
 
@@ -176,7 +189,7 @@ steps:
         fi
 
         echo
-        echo "Generated:"
+        echo "Generated package:"
         echo "$PKG_FILE"
 
         cp "$PKG_FILE" \
@@ -185,65 +198,25 @@ steps:
         echo
         echo "Package information:"
         pacman -Qip "$PKG_FILE"
-
-        # ------------------------------------------
-        # Only remove conflicting system Mesa
-        # after the package has successfully built.
-        # ------------------------------------------
-
-        if [[ "$pkg" == "mesa-ps4" ]]; then
-
-          echo
-          echo "Removing conflicting Arch Mesa packages..."
-
-          pacman -Rdd --noconfirm mesa || true
-          pacman -Rdd --noconfirm lib32-mesa || true
-
-        fi
-
-        echo
-        echo "Installing $PKG_FILE"
-
-        pacman -U --noconfirm "$PKG_FILE"
       }
 
-      # ==================================================
-      # Enable multilib
-      # ==================================================
+      # Build libdrm first
+      build_package libdrm-ps4
 
-      if ! grep -q '^multilib' /etc/pacman.conf; then
+      # Install libdrm-ps4 before Mesa build if needed
+      LIBDRM_PKG=$(find "$GITHUB_WORKSPACE/libdrm-ps4" \
+        -maxdepth 1 \
+        -type f \
+        -name "*.pkg.tar.zst" \
+        | head -n1)
 
-        cat >> /etc/pacman.conf << 'EOF'
-
-      [multilib]
-      Include = /etc/pacman.d/mirrorlist
-      EOF
-
+      if [ -n "$LIBDRM_PKG" ]; then
+        echo "Installing libdrm-ps4 for Mesa build..."
+        pacman -U --noconfirm "$LIBDRM_PKG"
       fi
 
-      pacman -Sy --noconfirm \
-        lib32-gcc-libs \
-        lib32-libpciaccess
-
-      # ==================================================
-      # PS4 packages
-      # ==================================================
-
-      build_and_install libdrm-ps4
-
-      # ==================================================
-      # Mesa PS4
-      # ==================================================
-
-      build_and_install mesa-ps4
-
-      # ==================================================
-      # Optional packages
-      # ==================================================
-
-      # build_and_install lib32-libdrm-ps4
-      # build_and_install xf86-video-amdgpu-ps4
-      # build_and_install lib32-mesa-ps4
+      # Build Mesa PS4
+      build_package mesa-ps4
 
   # ==================================================
   # Inspect Mesa package
@@ -256,31 +229,42 @@ steps:
 
       cd "$GITHUB_WORKSPACE/$REPO_DIR"
 
-      echo "===== Packages ====="
+      echo "===== Generated packages ====="
       ls -lh
 
-      echo
-      echo "===== Rusticl ====="
+      MESA_PKG=$(find . \
+        -maxdepth 1 \
+        -type f \
+        -name "mesa-ps4-*.pkg.tar.zst" \
+        | head -n1)
 
-      tar -tf mesa-ps4-*.pkg.tar.zst \
+      if [ -z "$MESA_PKG" ]; then
+        echo "ERROR: mesa-ps4 package not found"
+        exit 1
+      fi
+
+      echo
+      echo "===== Rusticl files ====="
+
+      tar -tf "$MESA_PKG" \
         | grep -Ei \
           'Rusticl|rusticl|libRusticlOpenCL|OpenCL' \
         || true
 
       echo
-      echo "===== radeonsi ====="
+      echo "===== radeonsi files ====="
 
-      tar -tf mesa-ps4-*.pkg.tar.zst \
+      tar -tf "$MESA_PKG" \
         | grep -Ei 'radeonsi' \
         || true
 
       echo
-      echo "===== LLVM ====="
+      echo "===== Build LLVM ====="
 
       pacman -Q llvm llvm-libs clang
 
   # ==================================================
-  # Create repository
+  # Create repository database
   # ==================================================
 
   - name: Create repo
@@ -290,9 +274,17 @@ steps:
 
       cd "$GITHUB_WORKSPACE/$REPO_DIR"
 
+      rm -f \
+        ps4-video.db \
+        ps4-video.db.tar.zst \
+        ps4-video.files \
+        ps4-video.files.tar.zst
+
       repo-add \
         ps4-video.db.tar.zst \
         *.pkg.tar.zst
+
+      ls -lh
 
   # ==================================================
   # Commit artifacts
@@ -304,18 +296,17 @@ steps:
     run: |
       set -euxo pipefail
 
-      cd "$GITHUB_WORKSPACE/$REPO_DIR"
+      git config user.name "github-actions[bot]"
+      git config user.email \
+        "41898282+github-actions[bot]@users.noreply.github.com"
 
-      pwd
-      ls -la
+      git add "$REPO_DIR"
 
-      git config user.name "github-actions"
-      git config user.email "actions@github.com"
+      if git diff --cached --quiet; then
+        echo "No artifact changes to commit."
+      else
+        git commit \
+          -m "Update PS4 Mesa stack + Rusticl $(date -u +'%Y-%m-%d %H:%M UTC')"
 
-      git add *
-
-      git commit \
-        -m "Update Mesa PS4 26.1.4 + Rusticl $(date +'%Y-%m-%d %H:%M')" \
-        || echo "No changes"
-
-      git push
+        git push
+      fi
