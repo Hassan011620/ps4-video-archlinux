@@ -94,6 +94,12 @@ conflicts=(
 url="https://www.mesa3d.org"
 license=('custom')
 
+============================================================
+
+Mesa 26.1.4 release tarball
+
+============================================================
+
 source=(
 "mesa-${pkgver}.tar.xz::https://archive.mesa3d.org/mesa-${pkgver}.tar.xz"
 'LICENSE'
@@ -108,13 +114,17 @@ sha256sums=(
 
 options=(!lto !debug)
 
+============================================================
+
 Rust crates used by Mesa
 
+============================================================
+
 declare -A _crates=(
-proc-macro2    1.0.70
-quote          1.0.33
-syn            2.0.39
-unicode-ident  1.0.12
+[proc-macro2]=1.0.70
+[quote]=1.0.33
+[syn]=2.0.39
+[unicode-ident]=1.0.12
 )
 
 for _crate in "${!_crates[@]}"; do
@@ -123,22 +133,28 @@ source+=(
 )
 done
 
-MESA_WHICH_LLVM:
+============================================================
+
+LLVM selection
 
 1 = llvm-minimal-git
 
 2 = aur llvm-git
 
-3 = llvm-git from unofficial repository
+3 = llvm-git unofficial repository
 
-4 = stable llvm from Arch extra
+4 = stable LLVM from Arch Extra
+
+============================================================
 
 _rusticl=false
+
 MESA_WHICH_LLVM=${MESA_WHICH_LLVM:-4}
 
 case $MESA_WHICH_LLVM in
 
 1)
+
     _rusticl=true
 
     makedepends+=(
@@ -162,11 +178,18 @@ case $MESA_WHICH_LLVM in
         'clang-opencl-headers-minimal-git'
     )
 
-    conflicts+=('opencl-rusticl-mesa')
-    provides+=('opencl-rusticl-mesa')
+    conflicts+=(
+        'opencl-rusticl-mesa'
+    )
+
+    provides+=(
+        'opencl-rusticl-mesa'
+    )
+
     ;;
 
 2)
+
     makedepends+=(
         'aur-llvm-git'
         'libclc-git'
@@ -175,11 +198,18 @@ case $MESA_WHICH_LLVM in
         'clang-opencl-headers-git'
     )
 
-    depends+=('aur-llvm-libs-git')
-    optdepends+=('aur-llvm-git: opencl')
+    depends+=(
+        'aur-llvm-libs-git'
+    )
+
+    optdepends+=(
+        'aur-llvm-git: opencl'
+    )
+
     ;;
 
 3)
+
     makedepends+=(
         'llvm-git'
         'clang-git'
@@ -188,14 +218,20 @@ case $MESA_WHICH_LLVM in
         'spirv-llvm-translator-git'
     )
 
-    depends+=('llvm-libs-git')
+    depends+=(
+        'llvm-libs-git'
+    )
+
     optdepends+=(
         'clang-git: opencl'
         'compiler-rt: opencl'
     )
+
     ;;
 
 4)
+
+    # Stable Arch LLVM 22
     makedepends+=(
         'llvm'
         'clang'
@@ -214,16 +250,29 @@ case $MESA_WHICH_LLVM in
         'spirv-tools'
     )
 
-    conflicts+=('opencl-rusticl-mesa')
-    provides+=('opencl-rusticl-mesa')
+    conflicts+=(
+        'opencl-rusticl-mesa'
+    )
+
+    provides+=(
+        'opencl-rusticl-mesa'
+    )
 
     _rusticl=true
+
     ;;
 
 *)
+
     ;;
 
 esac
+
+============================================================
+
+Prepare
+
+============================================================
 
 prepare() {
 
@@ -233,9 +282,14 @@ if [[ -d _build ]]; then
     rm -rf _build
 fi
 
-echo "========================================"
-echo "Testing PS4 patch against Mesa ${pkgver}"
-echo "========================================"
+echo
+echo "=============================================="
+echo " Mesa ${pkgver}"
+echo " PS4 Liverpool patch"
+echo "=============================================="
+echo
+
+echo "Testing PS4 patch..."
 
 patch \
     --dry-run \
@@ -243,63 +297,144 @@ patch \
     --strip=1 \
     --input="${srcdir}/ps4-mesa.patch"
 
-echo "========================================"
-echo "Applying PS4 patch"
-echo "========================================"
+echo
+echo "PS4 patch applies successfully."
+echo
+
+echo "Applying PS4 patch..."
 
 patch \
     --forward \
     --strip=1 \
     --input="${srcdir}/ps4-mesa.patch"
 
+echo
+echo "PS4 patch applied."
+echo
+
 }
+
+============================================================
+
+Build
+
+============================================================
 
 build() {
 
 cd "${srcdir}/mesa-${pkgver}"
 
+echo
+echo "=============================================="
+echo " Mesa build configuration"
+echo "=============================================="
+echo
+echo "Mesa version : ${pkgver}"
+echo "LLVM mode    : ${MESA_WHICH_LLVM}"
+echo "Rusticl      : ${_rusticl}"
+echo "Gallium      : ${_gallium_drivers}"
+echo "Vulkan       : ${_vulkan_drivers}"
+echo
+
 local meson_options=(
+
     -D android-libbacktrace=disabled
+
     -D b_ndebug=true
+
     -D b_lto=true
+
     -D egl=enabled
+
     -D gallium-drivers=${_gallium_drivers}
+
     -D gallium-extra-hud=true
+
+    # Rusticl
     -D gallium-rusticl=${_rusticl}
+
     -D gallium-va=enabled
+
     -D gbm=enabled
+
     -D gles1=disabled
+
     -D gles2=enabled
+
     -D glvnd=enabled
+
     -D glx=dri
+
     -D libunwind=enabled
+
+    # LLVM
     -D llvm=enabled
+
     -D lmsensors=enabled
+
     -D microsoft-clc=disabled
+
     -D platforms=x11,wayland
+
     -D valgrind=disabled
+
     -D video-codecs=all
+
     -D vulkan-drivers=${_vulkan_drivers}
+
     -D vulkan-layers=device-select,overlay
+
     -D tools=[]
+
     -D zstd=enabled
+
     -D buildtype=release
+
     --wrap-mode=nofallback
+
     --force-fallback-for=syn,paste,rustc-hash
+
     -D prefix=/usr
+
     -D sysconfdir=/etc
 )
 
+# Minimal debug information.
 CFLAGS+=' -g1'
 CXXFLAGS+=' -g1'
 
-meson setup mesa _build "${meson_options[@]}"
+echo
+echo "Running Meson..."
+echo
+
+meson setup \
+    mesa \
+    _build \
+    "${meson_options[@]}"
+
+echo
+echo "=============================================="
+echo " Meson configuration"
+echo "=============================================="
+echo
 
 meson configure --no-pager _build
+
+echo
+echo "=============================================="
+echo " Building Mesa"
+echo "=============================================="
+echo
 
 ninja ${NINJAFLAGS} -C _build
 
 }
+
+============================================================
+
+Package
+
+============================================================
 
 package() {
 
@@ -308,12 +443,20 @@ cd "${srcdir}/mesa-${pkgver}"
 DESTDIR="${pkgdir}" \
     ninja ${NINJAFLAGS} -C _build install
 
-rm -f "${pkgdir}/usr/bin/mesa-overlay-control.py"
-rmdir "${pkgdir}/usr/bin" 2>/dev/null || true
+rm -f \
+    "${pkgdir}/usr/bin/mesa-overlay-control.py"
+
+rmdir \
+    "${pkgdir}/usr/bin" \
+    2>/dev/null || true
+
+# GLX indirect rendering
 
 ln -sf \
     /usr/lib/libGLX_mesa.so.0 \
     "${pkgdir}/usr/lib/libGLX_indirect.so.0"
+
+# License
 
 install -m644 -Dt \
     "${pkgdir}/usr/share/licenses/${pkgname}" \
